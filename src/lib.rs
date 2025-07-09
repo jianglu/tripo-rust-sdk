@@ -7,9 +7,13 @@ use reqwest::header::{HeaderMap, AUTHORIZATION};
 use reqwest::multipart;
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::path::Path;
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
-use tokio::fs::File;
+use tokio::fs;
+use tokio::io::AsyncWriteExt;
+use tokio::time::sleep;
 use tokio_util::codec::{BytesCodec, FramedRead};
 use url::Url;
 
@@ -69,6 +73,39 @@ pub struct Model {
     pub url: String,
 }
 
+/// Represents the state of a generation task.
+///
+/// This enum is used in `TaskStatus` to provide a clear, typed status,
+/// preventing the use of raw strings.
+#[derive(Deserialize, Debug, PartialEq, Eq, Clone)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskState {
+    /// The task has been received and is waiting to be processed.
+    Queued,
+    /// The task is actively being processed.
+    Processing,
+    /// The task completed successfully.
+    Success,
+    /// The task failed to complete.
+    Failed,
+    /// The task is in an unknown or unexpected state.
+    #[serde(other)]
+    Unknown,
+}
+
+impl fmt::Display for TaskState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            TaskState::Queued => "queued",
+            TaskState::Processing => "processing",
+            TaskState::Success => "success",
+            TaskState::Failed => "failed",
+            TaskState::Unknown => "unknown",
+        };
+        write!(f, "{}", s)
+    }
+}
+
 /// Represents the status of a generation task.
 #[derive(Deserialize, Debug)]
 pub struct TaskStatus {
@@ -78,7 +115,7 @@ pub struct TaskStatus {
     #[serde(rename = "type")]
     pub type_: String,
     /// The current status of the task (e.g., "success", "processing").
-    pub status: String,
+    pub status: TaskState,
     /// The progress of the task, from 0 to 100.
     pub progress: u32,
     /// The timestamp when the task was created.
@@ -189,7 +226,7 @@ impl TripoClient {
     ) -> Result<TaskResponse, TripoError> {
         let url = self.base_url.join("v2/direct/generate")?;
 
-        let file = File::open(image_path)
+        let file = fs::File::open(image_path)
             .await
             .map_err(|e| TripoError::ApiError {
                 message: e.to_string(),
@@ -264,5 +301,147 @@ impl TripoClient {
                 message: error_response.to_string(),
             })
         }
+    }
+
+    /// Waits for a task to complete.
+    ///
+    /// This method polls the `get_task` endpoint until the task status is
+    /// either `Success` or `Failed`.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - The ID of the task to wait for.
+    /// * `verbose` - If `true`, prints the task progress to the console.
+    ///
+    /// # Returns
+    ///
+    /// The final `TaskStatus` of the completed or failed task.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use tripo3d::TripoClient;
+    /// # #[tokio::main]
+    /// # async fn main() -> anyhow::Result<()> {
+    /// # let client = TripoClient::new(Some("your_api_key".to_string()))?;
+    /// let task_id = "some_task_id";
+    /// let final_status = client.wait_for_task(task_id, true).await?;
+    /// println!("Task finished with status: {}", final_status.status);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn wait_for_task(
+        &self,
+        task_id: &str,
+        verbose: bool,
+    ) -> Result<TaskStatus, TripoError> {
+        loop {
+            let task_status = self.get_task(task_id).await?;
+            if verbose {
+                println!(
+                    "Task {}: status={}, progress={}%",
+                    task_id, task_status.status, task_status.progress
+                );
+            }
+            match task_status.status {
+                TaskState::Success | TaskState::Failed => {
+                    return Ok(task_status);
+                }
+                _ => {
+                    // Continue polling
+                    sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+    }
+
+    /// Downloads a single model file to a specified directory.
+    ///
+    /// This function handles the HTTP request to the model's URL and saves the
+    /// content to a local file. The filename is inferred from the URL.
+    ///
+    /// # Arguments
+    ///
+    /// * `model` - A reference to the `Model` struct containing the download URL.
+    /// * `destination_dir` - The local directory path where the file will be saved.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the `PathBuf` of the newly created file, or a `TripoError`.
+    ///
+    /// # Errors
+    ///
+    /// This function can return an error if the download fails, if the directory
+    /// or file cannot be created, or if there's an issue writing the file to disk.
+    pub async fn download_model<P: AsRef<Path>>(
+        &self,
+        model: &Model,
+        destination_dir: P,
+    ) -> Result<PathBuf, TripoError> {
+        let response = self.client.get(&model.url).send().await?;
+        if !response.status().is_success() {
+            return Err(TripoError::ApiError {
+                message: format!("Failed to download file: status {}", response.status()),
+            });
+        }
+
+        let file_name = model
+            .url
+            .split('/')
+            .last()
+            .unwrap_or(&model.id)
+            .to_string();
+        let dest_path = destination_dir.as_ref().join(file_name);
+
+        fs::create_dir_all(destination_dir.as_ref())
+            .await
+            .map_err(|e| TripoError::ApiError {
+                message: format!("Failed to create directory: {}", e),
+            })?;
+
+        let mut file = fs::File::create(&dest_path)
+            .await
+            .map_err(|e| TripoError::ApiError {
+                message: format!("Failed to create file: {}", e),
+            })?;
+
+        let content = response.bytes().await?;
+        file.write_all(&content).await.map_err(|e| {
+            TripoError::ApiError {
+                message: format!("Failed to write to file: {}", e),
+            }
+        })?;
+
+        Ok(dest_path)
+    }
+
+    /// Downloads all models from a completed task to a specified directory.
+    ///
+    /// This is a convenience method that iterates through the models in a `TaskStatus`
+    /// and calls `download_model` for each one.
+    ///
+    /// # Arguments
+    ///
+    /// * `task` - The completed `TaskStatus` containing the models to download.
+    /// * `destination_dir` - The directory where the models will be saved.
+    ///
+    /// # Returns
+    ///
+    /// A vector of `PathBuf`s for each downloaded file.
+    pub async fn download_all_models<P: AsRef<Path>>(
+        &self,
+        task: &TaskStatus,
+        destination_dir: P,
+    ) -> Result<Vec<PathBuf>, TripoError> {
+        let mut downloaded_files = Vec::new();
+        if let Some(models) = &task.models {
+            for model in models {
+                let file_path = self
+                    .download_model(model, destination_dir.as_ref())
+                    .await?;
+                downloaded_files.push(file_path);
+            }
+        }
+        Ok(downloaded_files)
     }
 } 

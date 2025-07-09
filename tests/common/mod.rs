@@ -1,6 +1,6 @@
-use wiremock::{MockServer, Mock, ResponseTemplate};
-use wiremock::matchers::{method, path, body_json, path_regex};
 use serde_json::json;
+use wiremock::matchers::{body_json, method, path, path_regex};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 pub async fn setup_mock_server() -> MockServer {
     let server = MockServer::start().await;
@@ -18,7 +18,7 @@ pub async fn setup_mock_server() -> MockServer {
         .mount(&server)
         .await;
 
-    // Mock for image_to_3d
+    // Mock for image_to_3d (simple version)
     Mock::given(method("POST"))
         .and(path("/v2/direct/generate"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -27,7 +27,7 @@ pub async fn setup_mock_server() -> MockServer {
         .mount(&server)
         .await;
 
-    // Mock for get_task
+    // Mock for get_task (single successful fetch)
     Mock::given(method("GET"))
         .and(path("/v2/organization/tasks/mock_task_id_123"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -45,7 +45,7 @@ pub async fn setup_mock_server() -> MockServer {
         })))
         .mount(&server)
         .await;
-    
+
     // Mock for get_balance
     Mock::given(method("GET"))
         .and(path("/v2/organization/account"))
@@ -57,5 +57,12 @@ pub async fn setup_mock_server() -> MockServer {
         .mount(&server)
         .await;
 
+    // Mock for model download
+    Mock::given(method("GET"))
+        .and(path("/model_poll.glb"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes("dummy model data"))
+        .mount(&server)
+        .await;
+
     server
-} 
+}

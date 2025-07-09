@@ -1,5 +1,5 @@
 mod common;
-use tripo3d::TripoClient;
+use tripo3d::{TripoClient, TaskState};
 use common::setup_mock_server;
 
 #[tokio::test]
@@ -10,7 +10,7 @@ async fn test_get_task_success() {
     let response = client.get_task("mock_task_id_123").await.unwrap();
 
     assert_eq!(response.task_id, "mock_task_id_123");
-    assert_eq!(response.status, "success");
+    assert_eq!(response.status, TaskState::Success);
     assert_eq!(response.progress, 100);
     assert!(response.models.is_some());
     let models = response.models.unwrap();
