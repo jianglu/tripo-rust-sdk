@@ -46,20 +46,9 @@ pub async fn setup_mock_server() -> MockServer {
         .mount(&server)
         .await;
 
-    // Mock for get_balance
-    Mock::given(method("GET"))
-        .and(path("/v2/organization/account"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "total_granted_credits": 1000.0,
-            "total_used_credits": 50.0,
-            "total_available_credits": 950.0
-        })))
-        .mount(&server)
-        .await;
-
     // Mock for model download
     Mock::given(method("GET"))
-        .and(path("/model_poll.glb"))
+        .and(path_regex(r"/model_.*\.glb"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes("dummy model data"))
         .mount(&server)
         .await;

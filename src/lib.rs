@@ -37,6 +37,9 @@ pub enum TripoError {
         /// The error message from the API.
         message: String,
     },
+    /// An error occurred while interacting with a file.
+    #[error("File error: {0}")]
+    FileError(#[from] std::io::Error),
 }
 
 /// The main client for interacting with the Tripo3D API.
@@ -127,12 +130,22 @@ pub struct TaskStatus {
 /// Represents the user's account balance.
 #[derive(Deserialize, Debug)]
 pub struct Balance {
-    /// Total credits granted to the user.
-    pub total_granted_credits: f64,
-    /// Total credits used by the user.
-    pub total_used_credits: f64,
-    /// Total credits currently available.
-    pub total_available_credits: f64,
+    /// The available balance.
+    pub balance: f64,
+    /// The amount of credits that are currently frozen.
+    pub frozen: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiResponse<T> {
+    data: T,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Task {
+    /// The unique identifier for the newly created task.
+    #[serde(rename = "task_id")]
+    pub task_id: String,
 }
 
 impl TripoClient {
@@ -286,19 +299,18 @@ impl TripoClient {
     ///
     /// # Returns
     ///
-    /// A `Balance` struct containing credit information.
+    /// A `Result` containing the `Balance` on success, or a `TripoError` on failure.
     pub async fn get_balance(&self) -> Result<Balance, TripoError> {
-        let url = self.base_url.join("v2/organization/account")?;
-
+        let url = self.base_url.join("v2/openapi/user/balance")?;
         let response = self.client.get(url).send().await?;
 
         if response.status().is_success() {
-            let balance: Balance = response.json().await?;
-            Ok(balance)
+            let api_response: ApiResponse<Balance> = response.json().await?;
+            Ok(api_response.data)
         } else {
-            let error_response: serde_json::Value = response.json().await?;
+            let error_body: serde_json::Value = response.json().await.unwrap_or_default();
             Err(TripoError::ApiError {
-                message: error_response.to_string(),
+                message: format!("API error: {}", error_body),
             })
         }
     }

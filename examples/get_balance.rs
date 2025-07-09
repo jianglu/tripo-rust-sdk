@@ -9,7 +9,9 @@ async fn main() -> anyhow::Result<()> {
 
     match client.get_balance().await {
         Ok(balance) => {
-            println!("Account Balance: {:?}", balance);
+            println!("Account balance details:");
+            println!("  Available: {}", balance.balance);
+            println!("  Frozen: {}", balance.frozen);
         }
         Err(e) => {
             eprintln!("Error: {}", e);
