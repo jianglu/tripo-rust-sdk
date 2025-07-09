@@ -1,7 +1,15 @@
 //! An unofficial Rust SDK for the Tripo3D API.
 //!
 //! This SDK provides a convenient, asynchronous interface for interacting with the
-//! Tripo3D platform to generate 3D models from text or images.
+//! Tripo3D platform to generate 3D models from text prompts or images.
+//! It handles API requests, error handling, and file downloads, allowing you to focus on your application's core logic.
+//!
+//! ## Features
+//! - Text-to-3D and Image-to-3D generation.
+//! - Asynchronous API for non-blocking operations.
+//! - Task polling to wait for generation completion.
+//! - Helper functions for downloading generated models.
+//! - Typed error handling for robust applications.
 
 use reqwest::header::{HeaderMap, AUTHORIZATION};
 use reqwest::multipart;
@@ -19,39 +27,44 @@ use url::Url;
 
 const DEFAULT_API_URL: &str = "https://api.tripo3d.ai/";
 
-/// Represents the possible errors that can occur when using the Tripo SDK.
+/// Represents the possible errors that can occur when using the Tripo3D SDK.
 #[derive(Error, Debug)]
 pub enum TripoError {
-    /// An error occurred during an HTTP request.
+    /// An error occurred during an HTTP request (e.g., network issue).
     #[error("Request error: {0}")]
     RequestError(#[from] reqwest::Error),
-    /// An error occurred while parsing a URL.
+    /// An error occurred while parsing a URL, typically the base URL.
     #[error("URL parsing error: {0}")]
     UrlError(#[from] url::ParseError),
     /// The API key was not provided, either directly or via the `TRIPO_API_KEY` environment variable.
     #[error("API key not provided")]
     NoApiKey,
-    /// An error returned by the Tripo3D API.
+    /// The API returned a non-successful status code.
     #[error("API error: {message}")]
     ApiError {
-        /// The error message from the API.
+        /// The error message returned by the API.
         message: String,
     },
-    /// An error occurred while interacting with a file.
+    /// An error occurred during file I/O operations.
     #[error("File error: {0}")]
     FileError(#[from] std::io::Error),
+    /// An error occurred during JSON deserialization, indicating a mismatch
+    /// between the API response and the expected data structure.
+    #[error("JSON deserialization error: {0}")]
+    JsonError(#[from] serde_json::Error),
 }
 
 /// The main client for interacting with the Tripo3D API.
 ///
-/// It holds the HTTP client and the base URL for all API requests.
-/// It is cloneable and can be shared across threads.
+/// It holds the shared `reqwest::Client` and the base URL for all API requests.
+/// It is designed to be cloneable and safe to share across threads.
 #[derive(Clone)]
 pub struct TripoClient {
     client: reqwest::Client,
     base_url: Url,
 }
 
+/// A private struct for serializing the text-to-3D request body.
 #[derive(Serialize)]
 struct TextTo3DRequest<'a> {
     prompt: &'a str,
@@ -59,7 +72,7 @@ struct TextTo3DRequest<'a> {
     type_: &'a str,
 }
 
-/// The response from an API call that initiates a task.
+/// The response from an API call that successfully initiates a task.
 #[derive(Deserialize, Debug)]
 pub struct TaskResponse {
     /// The unique identifier for the newly created task.
@@ -67,7 +80,10 @@ pub struct TaskResponse {
     pub task_id: String,
 }
 
-/// Represents a generated 3D model file.
+/// A temporary struct used to facilitate model downloading.
+///
+/// This struct is created internally by `download_all_models` to pass
+/// the necessary URL and a placeholder ID to the `download_model` function.
 #[derive(Deserialize, Debug)]
 pub struct Model {
     /// The unique identifier for the model.
@@ -76,9 +92,23 @@ pub struct Model {
     pub url: String,
 }
 
-/// Represents the state of a generation task.
+/// Represents a downloadable file within the task result.
+#[derive(Deserialize, Debug, Clone)]
+pub struct ResultFile {
+    /// The URL to download the file.
+    pub url: String,
+}
+
+/// Contains the output of a successfully completed task.
+#[derive(Deserialize, Debug, Clone)]
+pub struct TaskResult {
+    /// The PBR (Physically-Based Rendering) model file.
+    pub pbr_model: ResultFile,
+}
+
+/// Represents the lifecycle state of a generation task.
 ///
-/// This enum is used in `TaskStatus` to provide a clear, typed status,
+/// This enum is used in [`TaskStatus`] to provide a clear, typed status,
 /// preventing the use of raw strings.
 #[derive(Deserialize, Debug, PartialEq, Eq, Clone)]
 #[serde(rename_all = "lowercase")]
@@ -87,9 +117,9 @@ pub enum TaskState {
     Queued,
     /// The task is actively being processed.
     Processing,
-    /// The task completed successfully.
+    /// The task completed successfully and the model is ready.
     Success,
-    /// The task failed to complete.
+    /// The task failed to complete. Check API logs for details.
     Failed,
     /// The task is in an unknown or unexpected state.
     #[serde(other)]
@@ -109,7 +139,7 @@ impl fmt::Display for TaskState {
     }
 }
 
-/// Represents the status of a generation task.
+/// Represents the full status of a generation task, including metadata and results.
 #[derive(Deserialize, Debug)]
 pub struct TaskStatus {
     /// The unique identifier for the task.
@@ -117,35 +147,30 @@ pub struct TaskStatus {
     /// The type of the task (e.g., "text_to_model").
     #[serde(rename = "type")]
     pub type_: String,
-    /// The current status of the task (e.g., "success", "processing").
+    /// The current lifecycle state of the task.
     pub status: TaskState,
     /// The progress of the task, from 0 to 100.
     pub progress: u32,
-    /// The timestamp when the task was created.
-    pub created_at: String,
-    /// A list of generated models, available when the task is complete.
-    pub models: Option<Vec<Model>>,
+    /// The Unix timestamp (in seconds) when the task was created.
+    #[serde(rename = "create_time")]
+    pub create_time: i64,
+    /// The output of the task, available only when the status is `Success`.
+    pub result: Option<TaskResult>,
 }
 
-/// Represents the user's account balance.
+/// Represents the user's account balance and credit information.
 #[derive(Deserialize, Debug)]
 pub struct Balance {
-    /// The available balance.
+    /// The available, usable balance.
     pub balance: f64,
-    /// The amount of credits that are currently frozen.
+    /// The amount of credits that are currently frozen or reserved for ongoing tasks.
     pub frozen: f64,
 }
 
+/// A generic wrapper for API responses where the main content is nested under a "data" field.
 #[derive(Debug, Deserialize)]
 struct ApiResponse<T> {
     data: T,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Task {
-    /// The unique identifier for the newly created task.
-    #[serde(rename = "task_id")]
-    pub task_id: String,
 }
 
 impl TripoClient {
@@ -156,9 +181,9 @@ impl TripoClient {
     ///
     /// # Errors
     ///
-    /// Returns `TripoError::NoApiKey` if the API key is not provided in either way.
-    /// Returns `TripoError::RequestError` if the HTTP client fails to build.
-    /// Returns `TripoError::UrlError` if the default API URL is invalid.
+    /// - `TripoError::NoApiKey` if the API key is not provided in either way.
+    /// - `TripoError::RequestError` if the internal HTTP client fails to build.
+    /// - `TripoError::UrlError` if the default API URL is invalid.
     pub fn new(api_key: Option<String>) -> Result<Self, TripoError> {
         let api_key = api_key
             .or_else(|| env::var("TRIPO_API_KEY").ok())
@@ -173,12 +198,12 @@ impl TripoClient {
     /// # Arguments
     ///
     /// * `api_key` - The API key for authentication.
-    /// * `base_url` - The base URL for the API.
+    /// * `base_url` - The base URL for the API (e.g., for a mock server).
     ///
     /// # Errors
     ///
-    /// Returns `TripoError::RequestError` if the HTTP client fails to build.
-    /// Returns `TripoError::UrlError` if the provided `base_url` is invalid.
+    /// - `TripoError::RequestError` if the internal HTTP client fails to build.
+    /// - `TripoError::UrlError` if the provided `base_url` is invalid.
     pub fn new_with_url(api_key: String, base_url: &str) -> Result<Self, TripoError> {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -195,7 +220,9 @@ impl TripoClient {
         Ok(Self { client, base_url })
     }
 
-    /// Submits a new text-to-3D generation task.
+    /// Submits a new text-to-3D generation task for quick generation.
+    ///
+    /// This endpoint is designed for fast, direct model generation.
     ///
     /// # Arguments
     ///
@@ -203,7 +230,7 @@ impl TripoClient {
     ///
     /// # Returns
     ///
-    /// A `TaskResponse` containing the ID of the newly created task.
+    /// A [`TaskResponse`] containing the ID of the newly created task.
     pub async fn text_to_3d(&self, prompt: &str) -> Result<TaskResponse, TripoError> {
         let url = self.base_url.join("v2/direct/generate")?;
         let request_body = TextTo3DRequest {
@@ -214,41 +241,40 @@ impl TripoClient {
         let response = self.client.post(url).json(&request_body).send().await?;
 
         if response.status().is_success() {
-            let task_response: TaskResponse = response.json().await?;
+            let task_response = response.json().await?;
             Ok(task_response)
         } else {
-            let error_response: serde_json::Value = response.json().await?;
+            let error_response: serde_json::Value = response.json().await.unwrap_or_default();
             Err(TripoError::ApiError {
                 message: error_response.to_string(),
             })
         }
     }
 
-    /// Submits a new image-to-3D generation task.
+    /// Submits a new image-to-3D generation task for quick generation.
+    ///
+    /// This endpoint is designed for fast, direct model generation from an image.
     ///
     /// # Arguments
     ///
-    /// * `image_path` - The path to the image file to use for generation.
+    /// * `image_path` - The path to the local image file to use for generation.
     ///
     /// # Returns
     ///
-    /// A `TaskResponse` containing the ID of the newly created task.
+    /// A [`TaskResponse`] containing the ID of the newly created task.
     pub async fn image_to_3d<P: AsRef<Path>>(
         &self,
         image_path: P,
     ) -> Result<TaskResponse, TripoError> {
         let url = self.base_url.join("v2/direct/generate")?;
 
-        let file = fs::File::open(image_path)
-            .await
-            .map_err(|e| TripoError::ApiError {
-                message: e.to_string(),
-            })?;
+        let file = fs::File::open(image_path).await?;
         let stream = FramedRead::new(file, BytesCodec::new());
         let file_body = reqwest::Body::wrap_stream(stream);
 
+        // TODO: Dynamically determine file name and mime type.
         let some_file = multipart::Part::stream(file_body)
-            .file_name("image.png") // You might want to make this dynamic
+            .file_name("image.png")
             .mime_str("image/png")?;
 
         let form = multipart::Form::new()
@@ -258,10 +284,10 @@ impl TripoClient {
         let response = self.client.post(url).multipart(form).send().await?;
 
         if response.status().is_success() {
-            let task_response: TaskResponse = response.json().await?;
+            let task_response = response.json().await?;
             Ok(task_response)
         } else {
-            let error_response: serde_json::Value = response.json().await?;
+            let error_response: serde_json::Value = response.json().await.unwrap_or_default();
             Err(TripoError::ApiError {
                 message: error_response.to_string(),
             })
@@ -270,27 +296,29 @@ impl TripoClient {
 
     /// Retrieves the status of a specific task.
     ///
+    /// This is the primary method for polling the status of a long-running generation task.
+    ///
     /// # Arguments
     ///
     /// * `task_id` - The unique identifier of the task to query.
     ///
     /// # Returns
     ///
-    /// A `TaskStatus` struct containing the latest information about the task.
+    /// A [`TaskStatus`] struct containing the latest information about the task.
     pub async fn get_task(&self, task_id: &str) -> Result<TaskStatus, TripoError> {
         let url = self
             .base_url
-            .join(&format!("v2/organization/tasks/{}", task_id))?;
+            .join(&format!("v2/openapi/task/{}", task_id))?;
 
         let response = self.client.get(url).send().await?;
 
         if response.status().is_success() {
-            let task_status: TaskStatus = response.json().await?;
-            Ok(task_status)
+            let api_response: ApiResponse<TaskStatus> = response.json().await?;
+            Ok(api_response.data)
         } else {
-            let error_response: serde_json::Value = response.json().await?;
+            let error_body: serde_json::Value = response.json().await.unwrap_or_default();
             Err(TripoError::ApiError {
-                message: error_response.to_string(),
+                message: format!("API error: {}", error_body),
             })
         }
     }
@@ -299,7 +327,7 @@ impl TripoClient {
     ///
     /// # Returns
     ///
-    /// A `Result` containing the `Balance` on success, or a `TripoError` on failure.
+    /// A [`Result`] containing the [`Balance`] on success, or a [`TripoError`] on failure.
     pub async fn get_balance(&self) -> Result<Balance, TripoError> {
         let url = self.base_url.join("v2/openapi/user/balance")?;
         let response = self.client.get(url).send().await?;
@@ -315,9 +343,9 @@ impl TripoClient {
         }
     }
 
-    /// Waits for a task to complete.
+    /// Waits for a task to complete by polling its status.
     ///
-    /// This method polls the `get_task` endpoint until the task status is
+    /// This method repeatedly calls `get_task` until the task status is
     /// either `Success` or `Failed`.
     ///
     /// # Arguments
@@ -327,7 +355,7 @@ impl TripoClient {
     ///
     /// # Returns
     ///
-    /// The final `TaskStatus` of the completed or failed task.
+    /// The final [`TaskStatus`] of the completed or failed task.
     ///
     /// # Example
     ///
@@ -336,7 +364,7 @@ impl TripoClient {
     /// # #[tokio::main]
     /// # async fn main() -> anyhow::Result<()> {
     /// # let client = TripoClient::new(Some("your_api_key".to_string()))?;
-    /// let task_id = "some_task_id";
+    /// # let task_id = "some_task_id";
     /// let final_status = client.wait_for_task(task_id, true).await?;
     /// println!("Task finished with status: {}", final_status.status);
     /// # Ok(())
@@ -360,7 +388,7 @@ impl TripoClient {
                     return Ok(task_status);
                 }
                 _ => {
-                    // Continue polling
+                    // Continue polling after a short delay.
                     sleep(Duration::from_secs(2)).await;
                 }
             }
@@ -374,17 +402,17 @@ impl TripoClient {
     ///
     /// # Arguments
     ///
-    /// * `model` - A reference to the `Model` struct containing the download URL.
+    /// * `model` - A reference to a [`Model`] struct containing the download URL.
     /// * `destination_dir` - The local directory path where the file will be saved.
     ///
     /// # Returns
     ///
-    /// A `Result` containing the `PathBuf` of the newly created file, or a `TripoError`.
+    /// A `Result` containing the `PathBuf` of the newly created file, or a [`TripoError`].
     ///
     /// # Errors
     ///
-    /// This function can return an error if the download fails, if the directory
-    /// or file cannot be created, or if there's an issue writing the file to disk.
+    /// This function can return an error if the download fails, if the destination
+    /// directory or file cannot be created, or if there's an issue writing the file to disk.
     pub async fn download_model<P: AsRef<Path>>(
         &self,
         model: &Model,
@@ -397,62 +425,57 @@ impl TripoClient {
             });
         }
 
+        // Infer a reasonable filename from the URL, ignoring query parameters.
         let file_name = model
             .url
+            .split('?')
+            .next() // Get the part before the query string
+            .unwrap_or(&model.url)
             .split('/')
             .last()
             .unwrap_or(&model.id)
             .to_string();
         let dest_path = destination_dir.as_ref().join(file_name);
 
-        fs::create_dir_all(destination_dir.as_ref())
-            .await
-            .map_err(|e| TripoError::ApiError {
-                message: format!("Failed to create directory: {}", e),
-            })?;
+        fs::create_dir_all(destination_dir.as_ref()).await?;
 
-        let mut file = fs::File::create(&dest_path)
-            .await
-            .map_err(|e| TripoError::ApiError {
-                message: format!("Failed to create file: {}", e),
-            })?;
-
+        let mut file = fs::File::create(&dest_path).await?;
         let content = response.bytes().await?;
-        file.write_all(&content).await.map_err(|e| {
-            TripoError::ApiError {
-                message: format!("Failed to write to file: {}", e),
-            }
-        })?;
+        file.write_all(&content).await?;
 
         Ok(dest_path)
     }
 
     /// Downloads all models from a completed task to a specified directory.
     ///
-    /// This is a convenience method that iterates through the models in a `TaskStatus`
-    /// and calls `download_model` for each one.
+    /// This is a convenience method that extracts the model URL from a [`TaskStatus`]
+    /// and calls `download_model`.
     ///
     /// # Arguments
     ///
-    /// * `task` - The completed `TaskStatus` containing the models to download.
-    /// * `destination_dir` - The directory where the models will be saved.
+    /// * `task` - The completed [`TaskStatus`] containing the model to download.
+    /// * `destination_dir` - The directory where the model will be saved.
     ///
     /// # Returns
     ///
-    /// A vector of `PathBuf`s for each downloaded file.
+    /// A `Vec` containing the `PathBuf` of the downloaded file. The vector will
+    /// be empty if the task has no result.
     pub async fn download_all_models<P: AsRef<Path>>(
         &self,
         task: &TaskStatus,
         destination_dir: P,
     ) -> Result<Vec<PathBuf>, TripoError> {
         let mut downloaded_files = Vec::new();
-        if let Some(models) = &task.models {
-            for model in models {
-                let file_path = self
-                    .download_model(model, destination_dir.as_ref())
-                    .await?;
-                downloaded_files.push(file_path);
-            }
+        if let Some(result) = &task.result {
+            // Create a temporary `Model` struct to pass to the download helper.
+            let model_to_download = Model {
+                id: task.task_id.clone(), // Use the task_id as a fallback filename.
+                url: result.pbr_model.url.clone(),
+            };
+            let file_path = self
+                .download_model(&model_to_download, destination_dir.as_ref())
+                .await?;
+            downloaded_files.push(file_path);
         }
         Ok(downloaded_files)
     }

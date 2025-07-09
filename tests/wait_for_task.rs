@@ -15,32 +15,36 @@ impl Respond for PollingResponder {
         let mut count = self.call_count.lock().unwrap();
         *count += 1;
 
-        if *count <= 1 {
+        let body = if *count <= 1 {
             // First call: respond with "processing"
-            ResponseTemplate::new(200).set_body_json(json!({
-                "task_id": "polling_task_id",
-                "type": "text_to_model",
-                "status": "processing",
-                "progress": 50,
-                "created_at": "2024-01-01T00:00:00Z",
-                "models": null
-            }))
+            json!({
+                "data": {
+                    "task_id": "polling_task_id",
+                    "type": "text_to_model",
+                    "status": "processing",
+                    "progress": 50,
+                    "create_time": 1752091365,
+                    "result": null
+                }
+            })
         } else {
             // Subsequent calls: respond with "success"
-            ResponseTemplate::new(200).set_body_json(json!({
-                "task_id": "polling_task_id",
-                "type": "text_to_model",
-                "status": "success",
-                "progress": 100,
-                "created_at": "2024-01-01T00:00:00Z",
-                "models": [
-                    {
-                        "id": "model_id_poll",
-                        "url": "https://example.com/model_poll.glb"
+            json!({
+                "data": {
+                    "task_id": "polling_task_id",
+                    "type": "text_to_model",
+                    "status": "success",
+                    "progress": 100,
+                    "create_time": 1752091365,
+                    "result": {
+                        "pbr_model": {
+                            "url": "https://example.com/model_poll.glb"
+                        }
                     }
-                ]
-            }))
-        }
+                }
+            })
+        };
+        ResponseTemplate::new(200).set_body_json(body)
     }
 }
 
@@ -56,7 +60,7 @@ async fn test_wait_for_task_with_custom_responder() {
 
     // 3. Mount the mock with the custom responder
     Mock::given(method("GET"))
-        .and(path("/v2/organization/tasks/polling_task_id"))
+        .and(path("/v2/openapi/task/polling_task_id"))
         .respond_with(responder)
         .mount(&server)
         .await;
@@ -68,5 +72,5 @@ async fn test_wait_for_task_with_custom_responder() {
     // 5. Assert the final status is success
     assert_eq!(final_status.status, TaskState::Success);
     assert_eq!(final_status.progress, 100);
-    assert!(final_status.models.is_some());
+    assert!(final_status.result.is_some());
 } 

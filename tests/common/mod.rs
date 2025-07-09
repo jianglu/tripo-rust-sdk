@@ -29,19 +29,20 @@ pub async fn setup_mock_server() -> MockServer {
 
     // Mock for get_task (single successful fetch)
     Mock::given(method("GET"))
-        .and(path("/v2/organization/tasks/mock_task_id_123"))
+        .and(path_regex(r"/v2/openapi/task/mock_task_id_.*"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "task_id": "mock_task_id_123",
-            "type": "text_to_model",
-            "status": "success",
-            "progress": 100,
-            "created_at": "2024-01-01T00:00:00Z",
-            "models": [
-                {
-                    "id": "model_id_1",
-                    "url": "https://example.com/model1.glb"
+            "data": {
+                "task_id": "mock_task_id_123",
+                "type": "text_to_model",
+                "status": "success",
+                "progress": 100,
+                "create_time": 1752091365,
+                "result": {
+                    "pbr_model": {
+                        "url": "https://example.com/model1.glb"
+                    }
                 }
-            ]
+            }
         })))
         .mount(&server)
         .await;

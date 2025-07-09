@@ -21,8 +21,8 @@ dotenvy = "0.15"
 tracing = "0.1"
 thiserror = "1.0"
 tokio-util = { version = "0.7", features = ["codec"] }
+tempfile = "3.10"
 
 [dev-dependencies]
 tracing-subscriber = "0.3"
 wiremock = "0.6"
-tempfile = "3.10"

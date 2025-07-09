@@ -11,9 +11,7 @@ async fn test_get_task_success() {
 
     assert_eq!(response.task_id, "mock_task_id_123");
     assert_eq!(response.status, TaskState::Success);
-    assert_eq!(response.progress, 100);
-    assert!(response.models.is_some());
-    let models = response.models.unwrap();
-    assert_eq!(models.len(), 1);
-    assert_eq!(models[0].id, "model_id_1");
+    assert!(response.result.is_some());
+    let result = response.result.unwrap();
+    assert_eq!(result.pbr_model.url, "https://example.com/model1.glb");
 } 
