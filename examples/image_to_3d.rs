@@ -20,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
     let client = TripoClient::new(None)?;
 
     // Define the path to the input image.
-    let image_path = "assets/hamburger.png";
+    let image_path = "assets/image.png";
     println!("Submitting task for image: '{}'", image_path);
 
     // Call the image_to_3d method.
