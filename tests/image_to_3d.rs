@@ -1,12 +1,24 @@
-mod common;
 use tripo3d::TripoClient;
-use common::setup_mock_server;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+use serde_json::json;
 use std::fs::File;
 use std::io::Write;
 
 #[tokio::test]
 async fn test_image_to_3d_success() {
-    let server = setup_mock_server().await;
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v2/openapi/task"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "task_id": "mock_task_id_456"
+            }
+        })))
+        .mount(&server)
+        .await;
+    
     let client = TripoClient::new_with_url("test_api_key".to_string(), &server.uri()).unwrap();
 
     // Create a dummy image file

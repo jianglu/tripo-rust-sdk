@@ -66,10 +66,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     } else {
-        println!(
-            "\nTask finished with non-success status: {}",
-            final_status.status
-        );
+        println!("\nTask finished with status: {:?}", final_status.status);
     }
 
     Ok(())

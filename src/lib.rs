@@ -15,7 +15,6 @@ use reqwest::header::{HeaderMap, AUTHORIZATION};
 use reqwest::multipart;
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
@@ -92,70 +91,46 @@ pub struct Model {
     pub url: String,
 }
 
-/// Represents a downloadable file within the task result.
-#[derive(Deserialize, Debug, Clone)]
+/// Represents the state of a generation task.
+#[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskState {
+    Pending,
+    Running,
+    Success,
+    Failure,
+}
+
+/// Represents the file output from a successful task.
+#[derive(Debug, Deserialize, Clone)]
 pub struct ResultFile {
-    /// The URL to download the file.
     pub url: String,
 }
 
-/// Contains the output of a successfully completed task.
-#[derive(Deserialize, Debug, Clone)]
+/// Represents the different model files in a task result.
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct TaskResult {
-    /// The PBR (Physically-Based Rendering) model file.
-    pub pbr_model: ResultFile,
+    #[serde(default)]
+    pub pbr_model: Option<ResultFile>,
+    #[serde(default)]
+    pub glb_model: Option<ResultFile>,
 }
 
-/// Represents the lifecycle state of a generation task.
-///
-/// This enum is used in [`TaskStatus`] to provide a clear, typed status,
-/// preventing the use of raw strings.
-#[derive(Deserialize, Debug, PartialEq, Eq, Clone)]
-#[serde(rename_all = "lowercase")]
-pub enum TaskState {
-    /// The task has been received and is waiting to be processed.
-    Queued,
-    /// The task is actively being processed.
-    Processing,
-    /// The task completed successfully and the model is ready.
-    Success,
-    /// The task failed to complete. Check API logs for details.
-    Failed,
-    /// The task is in an unknown or unexpected state.
-    #[serde(other)]
-    Unknown,
+/// Represents the preview image generated during the task.
+#[derive(Debug, Deserialize, Clone)]
+pub struct TaskOutput {
+    pub generated_image: Option<String>,
 }
 
-impl fmt::Display for TaskState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            TaskState::Queued => "queued",
-            TaskState::Processing => "processing",
-            TaskState::Success => "success",
-            TaskState::Failed => "failed",
-            TaskState::Unknown => "unknown",
-        };
-        write!(f, "{}", s)
-    }
-}
-
-/// Represents the full status of a generation task, including metadata and results.
-#[derive(Deserialize, Debug)]
+/// Represents the detailed status and data of a generation task.
+#[derive(Debug, Deserialize, Clone)]
 pub struct TaskStatus {
-    /// The unique identifier for the task.
     pub task_id: String,
-    /// The type of the task (e.g., "text_to_model").
-    #[serde(rename = "type")]
-    pub type_: String,
-    /// The current lifecycle state of the task.
     pub status: TaskState,
-    /// The progress of the task, from 0 to 100.
-    pub progress: u32,
-    /// The Unix timestamp (in seconds) when the task was created.
-    #[serde(rename = "create_time")]
-    pub create_time: i64,
-    /// The output of the task, available only when the status is `Success`.
-    pub result: Option<TaskResult>,
+    pub progress: u8,
+    pub create_time: u64,
+    pub result: TaskResult,
+    pub output: Option<TaskOutput>,
 }
 
 /// Represents the user's account balance and credit information.
@@ -232,7 +207,7 @@ impl TripoClient {
     ///
     /// A [`TaskResponse`] containing the ID of the newly created task.
     pub async fn text_to_3d(&self, prompt: &str) -> Result<TaskResponse, TripoError> {
-        let url = self.base_url.join("v2/direct/generate")?;
+        let url = self.base_url.join("v2/openapi/task")?;
         let request_body = TextTo3DRequest {
             prompt,
             type_: "text_to_model",
@@ -241,8 +216,8 @@ impl TripoClient {
         let response = self.client.post(url).json(&request_body).send().await?;
 
         if response.status().is_success() {
-            let task_response = response.json().await?;
-            Ok(task_response)
+            let api_response: ApiResponse<TaskResponse> = response.json().await?;
+            Ok(api_response.data)
         } else {
             let error_response: serde_json::Value = response.json().await.unwrap_or_default();
             Err(TripoError::ApiError {
@@ -266,7 +241,7 @@ impl TripoClient {
         &self,
         image_path: P,
     ) -> Result<TaskResponse, TripoError> {
-        let url = self.base_url.join("v2/direct/generate")?;
+        let url = self.base_url.join("v2/openapi/task")?;
 
         let file = fs::File::open(image_path).await?;
         let stream = FramedRead::new(file, BytesCodec::new());
@@ -284,8 +259,8 @@ impl TripoClient {
         let response = self.client.post(url).multipart(form).send().await?;
 
         if response.status().is_success() {
-            let task_response = response.json().await?;
-            Ok(task_response)
+            let api_response: ApiResponse<TaskResponse> = response.json().await?;
+            Ok(api_response.data)
         } else {
             let error_response: serde_json::Value = response.json().await.unwrap_or_default();
             Err(TripoError::ApiError {
@@ -304,21 +279,20 @@ impl TripoClient {
     ///
     /// # Returns
     ///
-    /// A [`TaskStatus`] struct containing the latest information about the task.
+    /// A [`TaskStatus`] struct containing the details of the task.
     pub async fn get_task(&self, task_id: &str) -> Result<TaskStatus, TripoError> {
         let url = self
             .base_url
             .join(&format!("v2/openapi/task/{}", task_id))?;
-
         let response = self.client.get(url).send().await?;
 
         if response.status().is_success() {
             let api_response: ApiResponse<TaskStatus> = response.json().await?;
             Ok(api_response.data)
         } else {
-            let error_body: serde_json::Value = response.json().await.unwrap_or_default();
+            let error_response: serde_json::Value = response.json().await.unwrap_or_default();
             Err(TripoError::ApiError {
-                message: format!("API error: {}", error_body),
+                message: error_response.to_string(),
             })
         }
     }
@@ -366,7 +340,7 @@ impl TripoClient {
     /// # let client = TripoClient::new(Some("your_api_key".to_string()))?;
     /// # let task_id = "some_task_id";
     /// let final_status = client.wait_for_task(task_id, true).await?;
-    /// println!("Task finished with status: {}", final_status.status);
+    /// println!("Task finished with status: {:?}", final_status.status);
     /// # Ok(())
     /// # }
     /// ```
@@ -379,12 +353,12 @@ impl TripoClient {
             let task_status = self.get_task(task_id).await?;
             if verbose {
                 println!(
-                    "Task {}: status={}, progress={}%",
-                    task_id, task_status.status, task_status.progress
+                    "Task status: {:?}, progress: {}%",
+                    task_status.status, task_status.progress
                 );
             }
             match task_status.status {
-                TaskState::Success | TaskState::Failed => {
+                TaskState::Success | TaskState::Failure => {
                     return Ok(task_status);
                 }
                 _ => {
@@ -415,35 +389,31 @@ impl TripoClient {
     /// directory or file cannot be created, or if there's an issue writing the file to disk.
     pub async fn download_model<P: AsRef<Path>>(
         &self,
-        model: &Model,
-        destination_dir: P,
+        model_file: &ResultFile,
+        dest_dir: P,
     ) -> Result<PathBuf, TripoError> {
-        let response = self.client.get(&model.url).send().await?;
+        let parsed_url = Url::parse(&model_file.url)?;
+        let file_name = parsed_url
+            .path_segments()
+            .and_then(|segments| segments.last())
+            .unwrap_or("downloaded_model.bin");
+
+        let file_path = dest_dir.as_ref().join(file_name);
+        let response = self.client.get(model_file.url.clone()).send().await?;
+
         if !response.status().is_success() {
             return Err(TripoError::ApiError {
                 message: format!("Failed to download file: status {}", response.status()),
             });
         }
 
-        // Infer a reasonable filename from the URL, ignoring query parameters.
-        let file_name = model
-            .url
-            .split('?')
-            .next() // Get the part before the query string
-            .unwrap_or(&model.url)
-            .split('/')
-            .last()
-            .unwrap_or(&model.id)
-            .to_string();
-        let dest_path = destination_dir.as_ref().join(file_name);
+        fs::create_dir_all(dest_dir.as_ref()).await?;
 
-        fs::create_dir_all(destination_dir.as_ref()).await?;
-
-        let mut file = fs::File::create(&dest_path).await?;
+        let mut file = fs::File::create(&file_path).await?;
         let content = response.bytes().await?;
         file.write_all(&content).await?;
 
-        Ok(dest_path)
+        Ok(file_path)
     }
 
     /// Downloads all models from a completed task to a specified directory.
@@ -462,21 +432,21 @@ impl TripoClient {
     /// be empty if the task has no result.
     pub async fn download_all_models<P: AsRef<Path>>(
         &self,
-        task: &TaskStatus,
-        destination_dir: P,
+        task_status: &TaskStatus,
+        dest_dir: P,
     ) -> Result<Vec<PathBuf>, TripoError> {
         let mut downloaded_files = Vec::new();
-        if let Some(result) = &task.result {
-            // Create a temporary `Model` struct to pass to the download helper.
-            let model_to_download = Model {
-                id: task.task_id.clone(), // Use the task_id as a fallback filename.
-                url: result.pbr_model.url.clone(),
-            };
-            let file_path = self
-                .download_model(&model_to_download, destination_dir.as_ref())
-                .await?;
+
+        if let Some(pbr_model) = &task_status.result.pbr_model {
+            let file_path = self.download_model(pbr_model, &dest_dir).await?;
             downloaded_files.push(file_path);
         }
+
+        if let Some(glb_model) = &task_status.result.glb_model {
+            let file_path = self.download_model(glb_model, &dest_dir).await?;
+            downloaded_files.push(file_path);
+        }
+
         Ok(downloaded_files)
     }
 } 

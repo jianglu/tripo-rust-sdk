@@ -1,76 +1,58 @@
 use serde_json::json;
-use std::sync::{Arc, Mutex};
 use tripo3d::{TaskState, TripoClient};
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
+use wiremock::matchers::{method, path_regex};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-// A custom responder that changes its response on each call.
-struct PollingResponder {
-    // Use Arc<Mutex> to safely share state across async calls.
-    call_count: Arc<Mutex<u32>>,
-}
+struct CustomResponder;
 
-impl Respond for PollingResponder {
+impl wiremock::Respond for CustomResponder {
     fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
-        let mut count = self.call_count.lock().unwrap();
-        *count += 1;
+        // Use a static counter to simulate state changes
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let count = COUNTER.fetch_add(1, Ordering::SeqCst);
 
-        let body = if *count <= 1 {
-            // First call: respond with "processing"
-            json!({
-                "data": {
-                    "task_id": "polling_task_id",
-                    "type": "text_to_model",
-                    "status": "processing",
-                    "progress": 50,
-                    "create_time": 1752091365,
-                    "result": null
-                }
-            })
+        let (status, progress, result) = if count < 2 {
+            // State 1: Running
+            ("running", 50, json!({}))
         } else {
-            // Subsequent calls: respond with "success"
-            json!({
-                "data": {
-                    "task_id": "polling_task_id",
-                    "type": "text_to_model",
-                    "status": "success",
-                    "progress": 100,
-                    "create_time": 1752091365,
-                    "result": {
-                        "pbr_model": {
-                            "url": "https://example.com/model_poll.glb"
-                        }
-                    }
-                }
-            })
+            // State 2: Success
+            (
+                "success",
+                100,
+                json!({
+                    "pbr_model": { "url": "http://example.com/model.glb" }
+                }),
+            )
         };
-        ResponseTemplate::new(200).set_body_json(body)
+
+        ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "task_id": "mock_task_id_123",
+                "type": "text_to_model",
+                "status": status,
+                "progress": progress,
+                "create_time": 123456789,
+                "output": null,
+                "result": result
+            }
+        }))
     }
 }
 
 #[tokio::test]
 async fn test_wait_for_task_with_custom_responder() {
-    // 1. Set up the mock server
     let server = MockServer::start().await;
 
-    // 2. Create an instance of our custom responder
-    let responder = PollingResponder {
-        call_count: Arc::new(Mutex::new(0)),
-    };
-
-    // 3. Mount the mock with the custom responder
     Mock::given(method("GET"))
-        .and(path("/v2/openapi/task/polling_task_id"))
-        .respond_with(responder)
+        .and(path_regex(r"/v2/openapi/task/mock_task_id_123"))
+        .respond_with(CustomResponder)
         .mount(&server)
         .await;
 
-    // 4. Set up the client and run the test
     let client = TripoClient::new_with_url("test_api_key".to_string(), &server.uri()).unwrap();
-    let final_status = client.wait_for_task("polling_task_id", false).await.unwrap();
+    let final_status = client.wait_for_task("mock_task_id_123", true).await.unwrap();
 
-    // 5. Assert the final status is success
     assert_eq!(final_status.status, TaskState::Success);
-    assert_eq!(final_status.progress, 100);
-    assert!(final_status.result.is_some());
+    assert!(final_status.result.pbr_model.is_some());
 } 

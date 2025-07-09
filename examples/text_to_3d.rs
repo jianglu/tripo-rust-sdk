@@ -19,7 +19,7 @@ async fn main() -> anyhow::Result<()> {
     let client = TripoClient::new(None)?;
 
     // Define the prompt for the 3D model.
-    let prompt = "a delicious hamburger";
+    let prompt = "a nice house";
     println!("Submitting task for prompt: '{}'", prompt);
 
     // Call the text_to_3d method.
