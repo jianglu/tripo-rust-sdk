@@ -2,10 +2,10 @@
 name = "tripo3d"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name <you@example.com>"]
-description = "Official Tripo3d Rust SDK"
+authors = ["Jiang Lu <droidream@gmail.com>"]
+description = "An unofficial Rust SDK for the Tripo3D API"
 license = "MIT"
-repository = "https://github.com/your-username/tripo-rust-sdk"
+repository = "https://github.com/jianglu/tripo-rust-sdk"
 homepage = "https://platform.tripo3d.ai"
 keywords = ["sdk", "tripo", "3d-generation"]
 categories = ["api-bindings"]
@@ -25,4 +25,4 @@ tokio-util = { version = "0.7", features = ["codec"] }
 [dev-dependencies]
 tracing-subscriber = "0.3"
 wiremock = "0.6"
-tempfile = "3.10" 
+tempfile = "3.10"

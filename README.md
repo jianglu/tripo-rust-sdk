@@ -3,7 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/tripo3d.svg)](https://crates.io/crates/tripo3d)
 [![docs.rs](https://docs.rs/tripo3d/badge.svg)](https://docs.rs/tripo3d)
 
-The official Rust SDK for the [Tripo3d API](https://platform.tripo3d.ai/documentation/guides/get_started), providing an easy-to-use interface for 3D model generation.
+An unofficial Rust SDK for the [Tripo3d API](https://platform.tripo3d.ai/documentation/guides/get_started), providing an easy-to-use interface for 3D model generation.
 
 ## Features
 
