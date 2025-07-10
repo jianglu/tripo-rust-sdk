@@ -35,6 +35,7 @@ static UUID_RE: Lazy<Regex> = Lazy::new(|| {
 pub struct TripoClient {
     client: reqwest::Client,
     base_url: Url,
+    /// (For testing) Overrides the S3 endpoint to allow mocking S3 uploads.
     pub s3_endpoint_override: Option<String>,
 }
 
@@ -44,11 +45,25 @@ impl TripoClient {
     /// This method initializes the client with an API key. It first checks for the `api_key`
     /// parameter. If it's `None`, it falls back to the `TRIPO_API_KEY` environment variable.
     ///
+    /// # Arguments
+    ///
+    /// * `api_key` - An `Option<String>` containing the API key.
+    ///
     /// # Errors
     ///
-    /// - `TripoError::MissingApiKey` if the API key is not provided in either way.
-    /// - `TripoError::RequestError` if the internal HTTP client fails to build.
-    /// - `TripoError::UrlError` if the default API URL is invalid.
+    /// Returns `TripoError::MissingApiKey` if the API key is not provided either via the parameter or the environment variable.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use tripo3d::TripoClient;
+    /// // Create a client using a provided API key
+    /// let client_from_key = TripoClient::new(Some("your_api_key_here".to_string()));
+    ///
+    /// // Or create a client using the TRIPO_API_KEY environment variable
+    /// // (ensure it's set in your environment)
+    /// let client_from_env = TripoClient::new(None);
+    /// ```
     pub fn new(api_key: Option<String>) -> Result<Self, TripoError> {
         let api_key = api_key
             .or_else(|| env::var("TRIPO_API_KEY").ok());
@@ -86,8 +101,7 @@ impl TripoClient {
     ///
     /// # Errors
     ///
-    /// - `TripoError::RequestError` if the internal HTTP client fails to build.
-    /// - `TripoError::UrlError` if the provided `base_url` is invalid.
+    /// This function can return an error if the internal HTTP client fails to build or if the provided `base_url` is invalid.
     pub fn new_with_url(api_key: String, base_url: &str) -> Result<Self, TripoError> {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -108,9 +122,7 @@ impl TripoClient {
         })
     }
 
-    /// Submits a new text-to-3D generation task for quick generation.
-    ///
-    /// This endpoint is designed for fast, direct model generation.
+    /// Submits a new text-to-3D generation task.
     ///
     /// # Arguments
     ///
@@ -118,7 +130,11 @@ impl TripoClient {
     ///
     /// # Returns
     ///
-    /// A [`TaskResponse`] containing the ID of the newly created task.
+    /// On success, a [`TaskResponse`] containing the ID of the newly created task.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `TripoError` if the API request fails.
     pub async fn text_to_3d(&self, prompt: &str) -> Result<TaskResponse, TripoError> {
         let url = self.base_url.join("task")?;
         let request_body = TextTo3DRequest {
@@ -139,17 +155,14 @@ impl TripoClient {
         }
     }
 
-    /// Uploads a file to a temporary S3 location to be used in a task.
+    /// Uploads a file to a temporary S3 location using STS credentials.
     ///
-    /// This method replicates the primary upload mechanism of the official Python SDK.
+    /// This method replicates a secondary upload mechanism from the official Python SDK.
     /// It first requests temporary STS credentials from the Tripo API, then uses those
     /// credentials to upload the specified file directly to an S3 bucket.
     ///
-    /// **Note on AWS Region**: The Tripo API does not provide an AWS region for the S3
-    /// bucket. This function relies on the AWS SDK's ability to resolve the region from
-    /// the environment (e.g., the `AWS_REGION` environment variable) or the local
-    /// AWS config (`~/.aws/config`). Ensure a default region is configured if you
-    /// encounter connection issues.
+    /// **Note**: This is generally not the primary method for file uploads.
+    /// `upload_file` is preferred for most use cases.
     ///
     /// # Arguments
     ///
@@ -157,7 +170,11 @@ impl TripoClient {
     ///
     /// # Returns
     ///
-    /// A [`FileContent`] struct containing the S3 object details.
+    /// On success, a [`FileContent`] struct containing the S3 object details.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `TripoError` if fetching STS tokens, reading the file, or uploading to S3 fails.
     pub async fn upload_file_s3<P: AsRef<Path>>(&self, image_path: P) -> Result<FileContent, TripoError> {
         // 1. Get STS token from Tripo API
         let url = self.base_url.join("upload/sts/token")?;
@@ -230,8 +247,9 @@ impl TripoClient {
 
     /// Uploads a file using the standard multipart method to get a file token.
     ///
-    /// This method sends the file directly to the Tripo API as a multipart/form-data
-    /// request and receives a `file_token` in return.
+    /// This is the primary and recommended method for uploading files. It sends the file
+    /// directly to the Tripo API as a `multipart/form-data` request and receives a `file_token`
+    /// in return, which can then be used in other API calls.
     ///
     /// # Arguments
     ///
@@ -239,7 +257,11 @@ impl TripoClient {
     ///
     /// # Returns
     ///
-    /// A `file_token` as a `String`.
+    /// On success, a `file_token` as a `String`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `TripoError` if the file cannot be read or if the API request fails.
     pub async fn upload_file<P: AsRef<Path>>(&self, image_path: P) -> Result<String, TripoError> {
         let image_path = image_path.as_ref();
         let url = self.base_url.join("upload/sts")?;
@@ -282,23 +304,27 @@ impl TripoClient {
         }
     }
 
-    /// Submits a new image-to-3D generation task.
+    /// Submits a new image-to-model generation task.
     ///
-    /// The `image` parameter can be one of three things:
-    /// 1. A URL string starting with `http://` or `https://`.
-    /// 2. A file token (a UUID string).
-    /// 3. A path to a local file, which will be uploaded.
+    /// The `image` parameter is flexible and accepts one of three input types:
+    /// 1. A public URL string starting with `http://` or `https://`.
+    /// 2. A file token (as a UUID string) obtained from a previous upload.
+    /// 3. A path to a local file, which will be uploaded automatically.
     ///
     /// # Arguments
     ///
-    /// * `image` - The image input, as a URL, file token, or local file path.
+    /// * `image` - A string representing the image input (URL, file token, or local path).
     ///
     /// # Returns
     ///
-    /// A [`TaskResponse`] containing the ID of the newly created task.
+    /// On success, a [`TaskResponse`] containing the ID of the newly created task.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `TripoError` if the input string is a file path that doesn't exist,
+    /// if the file upload fails, or if the final API request fails.
     pub async fn image_to_model(&self, image: &str) -> Result<TaskResponse, TripoError> {
         let file_content = self._create_file_content_from_str(image).await?;
-        println!("file_content: {:?}", file_content);
 
         let request_body = ImageTaskRequest {
             type_: "image_to_model",
@@ -308,7 +334,6 @@ impl TripoClient {
         let url = self.base_url.join("task")?;
         let response = self.client.post(url).json(&request_body).send().await?;
 
-        println!("response: {:?}", response);
         if response.status().is_success() {
             let api_response: ApiResponse<TaskResponse> = response.json().await?;
             Ok(api_response.data)
@@ -374,8 +399,11 @@ impl TripoClient {
     ///
     /// # Returns
     ///
-    /// A [`TaskStatus`] struct with the latest status of the task.
+    /// On success, a [`TaskStatus`] struct with the latest status of the task.
     ///
+    /// # Errors
+    ///
+    /// Returns a `TripoError` if the API request fails.
     pub async fn get_task(&self, task_id: &str) -> Result<TaskStatus, TripoError> {
         let url = self
             .base_url
@@ -397,7 +425,11 @@ impl TripoClient {
     ///
     /// # Returns
     ///
-    /// A [`Balance`] struct containing the user's balance information.
+    /// On success, a [`Balance`] struct containing the user's balance information.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `TripoError` if the API request fails.
     pub async fn get_balance(&self) -> Result<Balance, TripoError> {
         let url = self.base_url.join("user/balance")?;
         let response = self.client.get(url).send().await?;
@@ -425,7 +457,11 @@ impl TripoClient {
     ///
     /// # Returns
     ///
-    /// The final [`TaskStatus`] of the completed or failed task.
+    /// On success, the final [`TaskStatus`] of the completed or failed task.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `TripoError` if polling fails at any point.
     ///
     /// # Example
     ///
@@ -472,17 +508,17 @@ impl TripoClient {
     ///
     /// # Arguments
     ///
-    /// * `model` - A reference to a [`Model`] struct containing the download URL.
-    /// * `destination_dir` - The local directory path where the file will be saved.
+    /// * `model_file` - A reference to a [`ResultFile`] struct containing the download URL.
+    /// * `dest_dir` - The local directory path where the file will be saved.
     ///
     /// # Returns
     ///
-    /// A `Result` containing the `PathBuf` of the newly created file, or a [`TripoError`].
+    /// A `Result` containing the `PathBuf` of the newly created file.
     ///
     /// # Errors
     ///
-    /// This function can return an error if the download fails, if the destination
-    /// directory or file cannot be created, or if there's an issue writing the file to disk.
+    /// Returns a `TripoError` if the download fails, the destination directory
+    /// or file cannot be created, or there's an issue writing the file to disk.
     pub async fn download_model<P: AsRef<Path>>(
         &self,
         model_file: &ResultFile,
@@ -514,18 +550,21 @@ impl TripoClient {
 
     /// Downloads all models from a completed task to a specified directory.
     ///
-    /// This is a convenience method that extracts the model URL from a [`TaskStatus`]
-    /// and calls `download_model`.
+    /// This is a convenience method that iterates over the results in a [`TaskStatus`]
+    /// and downloads each available model file.
     ///
     /// # Arguments
     ///
-    /// * `task` - The completed [`TaskStatus`] containing the model to download.
-    /// * `destination_dir` - The directory where the model will be saved.
+    /// * `task_status` - The completed [`TaskStatus`] containing the models to download.
+    /// * `dest_dir` - The directory where the models will be saved.
     ///
     /// # Returns
     ///
-    /// A `Vec` containing the `PathBuf` of the downloaded file. The vector will
-    /// be empty if the task has no result.
+    /// A `Vec` containing the `PathBuf` of each downloaded file.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `TripoError` if any of the model downloads fail.
     pub async fn download_all_models<P: AsRef<Path>>(
         &self,
         task_status: &TaskStatus,

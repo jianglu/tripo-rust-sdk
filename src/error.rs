@@ -1,17 +1,34 @@
-#[derive(Debug, thiserror::Error)]
+use thiserror::Error;
+
+/// The primary error type for the Tripo3D SDK.
+#[derive(Debug, Error)]
 pub enum TripoError {
+    /// The API key was not provided.
+    /// It must be supplied during client creation or set via the `TRIPO_API_KEY` environment variable.
     #[error("API key is missing. Please provide it or set the TRIPO_API_KEY environment variable.")]
     MissingApiKey,
+
+    /// A network request failed. This is often a wrapper around a `reqwest::Error`.
     #[error("Network request failed: {0}")]
-    RequestFailed(#[from] reqwest::Error),
+    RequestError(#[from] reqwest::Error),
+
+    /// Failed to parse a JSON response from the API.
     #[error("Failed to parse API response: {0}")]
-    ResponseParseFailed(#[from] serde_json::Error),
+    ResponseParseError(#[from] serde_json::Error),
+
+    /// The Tripo3D API returned an error. The message contains the details from the API.
     #[error("API request failed: {message}")]
     ApiError { message: String },
+
+    /// A URL could not be parsed. This can happen with an invalid base URL or a malformed URL from the API.
     #[error("URL parsing failed: {0}")]
-    UrlParseFailed(#[from] url::ParseError),
+    UrlError(#[from] url::ParseError),
+
+    /// An I/O error occurred, typically when reading or writing files.
     #[error("File I/O error: {0}")]
     IoError(#[from] std::io::Error),
-    #[error("File upload failed: {0}")]
-    UploadError(#[from] aws_sdk_s3::primitives::ByteStreamError),
+
+    /// The byte stream for a file upload could not be created.
+    #[error("File upload stream could not be created: {0}")]
+    UploadStreamError(#[from] aws_sdk_s3::primitives::ByteStreamError),
 } 
