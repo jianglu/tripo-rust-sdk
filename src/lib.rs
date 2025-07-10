@@ -5,7 +5,7 @@
 //! It handles API requests, error handling, and file downloads, allowing you to focus on your application's core logic.
 //!
 //! ## Features
-//! - Text-to-3D and image-to-model generation.
+//! - Text-to-model and image-to-model generation.
 //! - Asynchronous API for non-blocking operations.
 //! - Task polling to wait for generation completion.
 //! - Helper functions for downloading generated models.

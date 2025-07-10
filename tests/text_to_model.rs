@@ -4,7 +4,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use serde_json::json;
 
 #[tokio::test]
-async fn test_text_to_3d_success() {
+async fn test_text_to_model_success() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
@@ -23,7 +23,7 @@ async fn test_text_to_3d_success() {
     
     let client = TripoClient::new_with_url("test_api_key".to_string(), &server.uri()).unwrap();
 
-    let response = client.text_to_3d("a delicious hamburger").await.unwrap();
+    let response = client.text_to_model("a delicious hamburger").await.unwrap();
 
     assert_eq!(response.task_id, "mock_task_id_123");
 } 

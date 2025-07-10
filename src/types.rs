@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-/// A private struct for serializing the text-to-3D request body.
+/// A private struct for serializing the text-to-model request body.
 #[derive(Serialize)]
-pub(crate) struct TextTo3DRequest<'a> {
+pub(crate) struct TextToModelRequest<'a> {
     pub(crate) prompt: &'a str,
     #[serde(rename = "type")]
     pub(crate) type_: &'a str,

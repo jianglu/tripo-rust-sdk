@@ -1,7 +1,7 @@
 use crate::error::TripoError;
 use crate::types::{
     ApiResponse, Balance, FileContent, ImageTaskRequest, ResultFile, S3Object, TaskResponse,
-    TaskState, TaskStatus, TextTo3DRequest, StsTokenData, StandardUploadData,
+    TaskState, TaskStatus, TextToModelRequest, StsTokenData, StandardUploadData,
 };
 use reqwest::header::{HeaderMap, AUTHORIZATION};
 use std::env;
@@ -122,7 +122,7 @@ impl TripoClient {
         })
     }
 
-    /// Submits a new text-to-3D generation task.
+    /// Submits a new text-to-model generation task.
     ///
     /// # Arguments
     ///
@@ -135,9 +135,9 @@ impl TripoClient {
     /// # Errors
     ///
     /// Returns a `TripoError` if the API request fails.
-    pub async fn text_to_3d(&self, prompt: &str) -> Result<TaskResponse, TripoError> {
+    pub async fn text_to_model(&self, prompt: &str) -> Result<TaskResponse, TripoError> {
         let url = self.base_url.join("task")?;
-        let request_body = TextTo3DRequest {
+        let request_body = TextToModelRequest {
             prompt,
             type_: "text_to_model",
         };
