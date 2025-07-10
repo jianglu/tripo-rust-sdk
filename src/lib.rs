@@ -17,4 +17,4 @@ pub mod types;
 
 pub use client::TripoClient;
 pub use error::TripoError;
-pub use types::{Balance, Model, ResultFile, TaskResponse, TaskResult, TaskState, TaskStatus}; 
+pub use types::{Balance, ResultFile, TaskResponse, TaskResult, TaskState, TaskStatus}; 

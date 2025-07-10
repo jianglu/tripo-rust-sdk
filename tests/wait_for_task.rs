@@ -1,6 +1,6 @@
 use serde_json::json;
 use tripo3d::{TaskState, TripoClient};
-use wiremock::matchers::{method, path_regex};
+use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -45,7 +45,7 @@ async fn test_wait_for_task_with_custom_responder() {
     let server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path_regex(r"/v2/openapi/task/mock_task_id_123"))
+        .and(path("task/mock_task_id_123"))
         .respond_with(CustomResponder)
         .mount(&server)
         .await;

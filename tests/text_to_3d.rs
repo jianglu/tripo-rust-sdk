@@ -8,7 +8,7 @@ async fn test_text_to_3d_success() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/v2/openapi/task"))
+        .and(path("task"))
         .and(body_json(json!({
             "prompt": "a delicious hamburger",
             "type": "text_to_model"

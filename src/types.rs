@@ -8,6 +8,42 @@ pub(crate) struct TextTo3DRequest<'a> {
     pub(crate) type_: &'a str,
 }
 
+/// Represents an object stored in S3.
+#[derive(Serialize, Debug)]
+pub struct S3Object {
+    /// The S3 bucket name.
+    pub bucket: String,
+    /// The key (path) of the object in the bucket.
+    pub key: String,
+}
+
+/// Represents the file information sent to the task creation endpoint.
+#[derive(Serialize, Debug, Default)]
+pub struct FileContent {
+    /// The type of file, e.g., "png", "jpg".
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// The S3 object information, if uploaded via S3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object: Option<S3Object>,
+    /// The URL of the file, if provided directly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The file token, if using a pre-uploaded file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_token: Option<String>,
+}
+
+/// The request body for creating an image-to-model task.
+#[derive(Serialize, Debug)]
+pub struct ImageTaskRequest {
+    /// The type of task, e.g., "image_to_model".
+    #[serde(rename = "type")]
+    pub type_: &'static str,
+    /// The file content for the task.
+    pub file: FileContent,
+}
+
 /// The response from an API call that successfully initiates a task.
 #[derive(Deserialize, Debug)]
 pub struct TaskResponse {
@@ -16,16 +52,18 @@ pub struct TaskResponse {
     pub task_id: String,
 }
 
-/// A temporary struct used to facilitate model downloading.
-///
-/// This struct is created internally by `download_all_models` to pass
-/// the necessary URL and a placeholder ID to the `download_model` function.
 #[derive(Deserialize, Debug)]
-pub struct Model {
-    /// The unique identifier for the model.
-    pub id: String,
-    /// The URL to download the model file.
-    pub url: String,
+pub(crate) struct StsTokenData {
+    pub(crate) sts_ak: String,
+    pub(crate) sts_sk: String,
+    pub(crate) session_token: String,
+    pub(crate) resource_bucket: String,
+    pub(crate) resource_uri: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub(crate) struct StandardUploadData {
+    pub(crate) image_token: String,
 }
 
 /// Represents the state of a generation task.

@@ -1,6 +1,6 @@
 use tripo3d::{TaskState, TaskStatus, TripoClient};
 use wiremock::{
-    matchers::{method, path_regex},
+    matchers::{method, path},
     Mock, MockServer, ResponseTemplate,
 };
 use serde_json::json;
@@ -8,8 +8,10 @@ use serde_json::json;
 #[tokio::test]
 async fn test_get_task_success() {
     let server = MockServer::start().await;
+    let task_id = "mock_task_id_123";
+
     Mock::given(method("GET"))
-        .and(path_regex(r"/v2/openapi/task/mock_task_id_.*"))
+        .and(path(&format!("task/{}", task_id)))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": {
                 "task_id": "mock_task_id_123",
@@ -31,7 +33,7 @@ async fn test_get_task_success() {
         .await;
 
     let client = TripoClient::new_with_url("test_api_key".to_string(), &server.uri()).unwrap();
-    let response: TaskStatus = client.get_task("mock_task_id_123").await.unwrap();
+    let response: TaskStatus = client.get_task(task_id).await.unwrap();
 
     assert_eq!(response.task_id, "mock_task_id_123");
     assert_eq!(response.status, TaskState::Success);

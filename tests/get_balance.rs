@@ -8,7 +8,7 @@ async fn test_get_balance_success() {
     let server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/v2/openapi/user/balance"))
+        .and(path("user/balance"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": {
                 "balance": 950.0,

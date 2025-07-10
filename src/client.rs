@@ -1,19 +1,31 @@
 use crate::error::TripoError;
 use crate::types::{
-    ApiResponse, Balance, ResultFile, TaskResponse, TaskState, TaskStatus, TextTo3DRequest,
+    ApiResponse, Balance, FileContent, ImageTaskRequest, ResultFile, S3Object, TaskResponse,
+    TaskState, TaskStatus, TextTo3DRequest, StsTokenData, StandardUploadData,
 };
 use reqwest::header::{HeaderMap, AUTHORIZATION};
-use reqwest::multipart;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::time::sleep;
-use tokio_util::codec::{BytesCodec, FramedRead};
 use url::Url;
 
-const DEFAULT_API_URL: &str = "https://api.tripo3d.ai/";
+use aws_sdk_s3::config::SharedCredentialsProvider;
+use aws_credential_types::Credentials;
+use aws_sdk_s3::primitives::ByteStream;
+use once_cell::sync::Lazy;
+use regex::Regex;
+use reqwest::multipart;
+use tokio::fs::File;
+use tokio_util::codec::{BytesCodec, FramedRead};
+
+const DEFAULT_API_URL: &str = "https://api.tripo3d.ai/v2/openapi/";
+
+static UUID_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").unwrap()
+});
 
 /// The main client for interacting with the Tripo3D API.
 ///
@@ -23,6 +35,7 @@ const DEFAULT_API_URL: &str = "https://api.tripo3d.ai/";
 pub struct TripoClient {
     client: reqwest::Client,
     base_url: Url,
+    pub s3_endpoint_override: Option<String>,
 }
 
 impl TripoClient {
@@ -33,14 +46,33 @@ impl TripoClient {
     ///
     /// # Errors
     ///
-    /// - `TripoError::NoApiKey` if the API key is not provided in either way.
+    /// - `TripoError::MissingApiKey` if the API key is not provided in either way.
     /// - `TripoError::RequestError` if the internal HTTP client fails to build.
     /// - `TripoError::UrlError` if the default API URL is invalid.
     pub fn new(api_key: Option<String>) -> Result<Self, TripoError> {
         let api_key = api_key
-            .or_else(|| env::var("TRIPO_API_KEY").ok())
-            .ok_or(TripoError::NoApiKey)?;
-        Self::new_with_url(api_key, DEFAULT_API_URL)
+            .or_else(|| env::var("TRIPO_API_KEY").ok());
+        let Some(key) = api_key else {
+            return Err(TripoError::MissingApiKey);
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            format!("Bearer {}", key).parse().unwrap(),
+        );
+
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()?;
+
+        let base_url = Url::parse(DEFAULT_API_URL)?;
+
+        Ok(Self {
+            client,
+            base_url,
+            s3_endpoint_override: None,
+        })
     }
 
     /// Creates a new `TripoClient` with a custom base URL.
@@ -69,7 +101,11 @@ impl TripoClient {
 
         let base_url = Url::parse(base_url)?;
 
-        Ok(Self { client, base_url })
+        Ok(Self {
+            client,
+            base_url,
+            s3_endpoint_override: None,
+        })
     }
 
     /// Submits a new text-to-3D generation task for quick generation.
@@ -84,7 +120,7 @@ impl TripoClient {
     ///
     /// A [`TaskResponse`] containing the ID of the newly created task.
     pub async fn text_to_3d(&self, prompt: &str) -> Result<TaskResponse, TripoError> {
-        let url = self.base_url.join("v2/openapi/task")?;
+        let url = self.base_url.join("task")?;
         let request_body = TextTo3DRequest {
             prompt,
             type_: "text_to_model",
@@ -103,59 +139,176 @@ impl TripoClient {
         }
     }
 
-    /// Submits a new image-to-3D generation task for quick generation.
+    /// Uploads a file to a temporary S3 location to be used in a task.
     ///
-    /// This endpoint is designed for fast, direct model generation from an image.
+    /// This method replicates the primary upload mechanism of the official Python SDK.
+    /// It first requests temporary STS credentials from the Tripo API, then uses those
+    /// credentials to upload the specified file directly to an S3 bucket.
+    ///
+    /// **Note on AWS Region**: The Tripo API does not provide an AWS region for the S3
+    /// bucket. This function relies on the AWS SDK's ability to resolve the region from
+    /// the environment (e.g., the `AWS_REGION` environment variable) or the local
+    /// AWS config (`~/.aws/config`). Ensure a default region is configured if you
+    /// encounter connection issues.
     ///
     /// # Arguments
     ///
-    /// * `image_path` - The path to the local image file to use for generation.
+    /// * `image_path` - The path to the local image file to upload.
     ///
     /// # Returns
     ///
-    /// A [`TaskResponse`] containing the ID of the newly created task.
-    pub async fn image_to_3d<P: AsRef<Path>>(
-        &self,
-        image_path: P,
-    ) -> Result<TaskResponse, TripoError> {
-        let image_path = image_path.as_ref();
-        let url = self.base_url.join("v2/openapi/task")?;
+    /// A [`FileContent`] struct containing the S3 object details.
+    pub async fn upload_file_s3<P: AsRef<Path>>(&self, image_path: P) -> Result<FileContent, TripoError> {
+        // 1. Get STS token from Tripo API
+        let url = self.base_url.join("upload/sts/token")?;
+        let sts_response: ApiResponse<StsTokenData> = self
+            .client
+            .post(url)
+            .json(&serde_json::json!({ "format": "jpeg" }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        let sts_data = sts_response.data;
 
-        let file = fs::File::open(image_path).await?;
+        // 2. Configure S3 client with the temporary credentials
+        let s3_credentials = Credentials::new(
+            sts_data.sts_ak.clone(),
+            sts_data.sts_sk.clone(),
+            Some(sts_data.session_token.clone()),
+            None, // No expiration time needed here
+            "TripoStsProvider",
+        );
+
+        let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+        let mut s3_config_builder = aws_sdk_s3::config::Builder::from(&aws_config)
+            .credentials_provider(SharedCredentialsProvider::new(s3_credentials));
+
+        if let Some(endpoint_url) = &self.s3_endpoint_override {
+            s3_config_builder = s3_config_builder
+                .region(aws_sdk_s3::config::Region::new("us-east-1"))
+                .endpoint_url(endpoint_url)
+                .force_path_style(true);
+        }
+
+        let s3_config = s3_config_builder.build();
+        let s3_client = aws_sdk_s3::Client::from_conf(s3_config);
+
+        // 3. Upload file to S3
+        let body = ByteStream::from_path(image_path.as_ref()).await?;
+        
+        s3_client
+            .put_object()
+            .bucket(sts_data.resource_bucket.clone())
+            .key(sts_data.resource_uri.clone())
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| TripoError::ApiError {
+                message: format!("S3 upload failed: {}", e),
+            })?;
+
+        // 4. Return the file content structure
+        let s3_object = S3Object {
+            bucket: sts_data.resource_bucket,
+            key: sts_data.resource_uri,
+        };
+
+        let extension = image_path
+            .as_ref()
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("jpeg")
+            .to_string();
+
+        Ok(FileContent {
+            type_: extension,
+            object: Some(s3_object),
+            ..Default::default()
+        })
+    }
+
+    /// Uploads a file using the standard multipart method to get a file token.
+    ///
+    /// This method sends the file directly to the Tripo API as a multipart/form-data
+    /// request and receives a `file_token` in return.
+    ///
+    /// # Arguments
+    ///
+    /// * `image_path` - The path to the local image file to upload.
+    ///
+    /// # Returns
+    ///
+    /// A `file_token` as a `String`.
+    pub async fn upload_file<P: AsRef<Path>>(&self, image_path: P) -> Result<String, TripoError> {
+        let image_path = image_path.as_ref();
+        let url = self.base_url.join("upload/sts")?;
+
+        let file = File::open(image_path).await?;
         let stream = FramedRead::new(file, BytesCodec::new());
         let file_body = reqwest::Body::wrap_stream(stream);
 
         let file_name = image_path
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("image.bin")
+            .ok_or_else(|| {
+                TripoError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Could not determine file name",
+                ))
+            })?
             .to_string();
 
         let mime_type = mime_guess::from_path(image_path)
             .first_or_octet_stream()
             .to_string();
 
-        #[derive(serde::Serialize)]
-        struct ImageRequest<'a> {
-            #[serde(rename = "type")]
-            type_: &'a str,
-        }
-        let request_data = ImageRequest {
-            type_: "image_to_model",
-        };
-        let json_part = multipart::Part::text(serde_json::to_string(&request_data)?)
-            .mime_str("application/json")?;
-
         let file_part = multipart::Part::stream(file_body)
             .file_name(file_name)
             .mime_str(&mime_type)?;
 
-        let form = multipart::Form::new()
-            .part("json", json_part)
-            .part("file", file_part);
+        let form = multipart::Form::new().part("file", file_part);
 
         let response = self.client.post(url).multipart(form).send().await?;
 
+        if response.status().is_success() {
+            let api_response: ApiResponse<StandardUploadData> = response.json().await?;
+            Ok(api_response.data.image_token)
+        } else {
+            let error_response: serde_json::Value = response.json().await.unwrap_or_default();
+            Err(TripoError::ApiError {
+                message: error_response.to_string(),
+            })
+        }
+    }
+
+    /// Submits a new image-to-3D generation task.
+    ///
+    /// The `image` parameter can be one of three things:
+    /// 1. A URL string starting with `http://` or `https://`.
+    /// 2. A file token (a UUID string).
+    /// 3. A path to a local file, which will be uploaded.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - The image input, as a URL, file token, or local file path.
+    ///
+    /// # Returns
+    ///
+    /// A [`TaskResponse`] containing the ID of the newly created task.
+    pub async fn image_to_model(&self, image: &str) -> Result<TaskResponse, TripoError> {
+        let file_content = self._create_file_content_from_str(image).await?;
+        println!("file_content: {:?}", file_content);
+
+        let request_body = ImageTaskRequest {
+            type_: "image_to_model",
+            file: file_content,
+        };
+
+        let url = self.base_url.join("task")?;
+        let response = self.client.post(url).json(&request_body).send().await?;
+
+        println!("response: {:?}", response);
         if response.status().is_success() {
             let api_response: ApiResponse<TaskResponse> = response.json().await?;
             Ok(api_response.data)
@@ -165,6 +318,50 @@ impl TripoClient {
                 message: error_response.to_string(),
             })
         }
+    }
+
+    async fn _create_file_content_from_str(
+        &self,
+        image_str: &str,
+    ) -> Result<FileContent, TripoError> {
+        let file_content;
+
+        if image_str.starts_with("http://") || image_str.starts_with("https://") {
+            file_content = FileContent {
+                url: Some(image_str.to_string()),
+                type_: "jpeg".to_string(),
+                ..Default::default()
+            };
+        } else if UUID_RE.is_match(image_str) {
+            file_content = FileContent {
+                file_token: Some(image_str.to_string()),
+                type_: "jpeg".to_string(),
+                ..Default::default()
+            };
+        } else {
+            let path = Path::new(image_str);
+            if !path.exists() {
+                return Err(TripoError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("Image file not found: {}", image_str),
+                )));
+            }
+            // If it's a local file, upload it via multipart and get a file_token
+            let file_token = self.upload_file(path).await?;
+            let extension = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("jpeg")
+                .to_string();
+
+            file_content = FileContent {
+                file_token: Some(file_token),
+                type_: extension,
+                ..Default::default()
+            };
+        }
+
+        Ok(file_content)
     }
 
     /// Retrieves the status of a specific task.
@@ -177,11 +374,12 @@ impl TripoClient {
     ///
     /// # Returns
     ///
-    /// A [`TaskStatus`] struct containing the details of the task.
+    /// A [`TaskStatus`] struct with the latest status of the task.
+    ///
     pub async fn get_task(&self, task_id: &str) -> Result<TaskStatus, TripoError> {
         let url = self
             .base_url
-            .join(&format!("v2/openapi/task/{}", task_id))?;
+            .join(&format!("task/{}", task_id))?;
         let response = self.client.get(url).send().await?;
 
         if response.status().is_success() {
@@ -195,13 +393,13 @@ impl TripoClient {
         }
     }
 
-    /// Retrieves the user's account balance.
+    /// Queries the user's current account balance.
     ///
     /// # Returns
     ///
-    /// A [`Result`] containing the [`Balance`] on success, or a [`TripoError`] on failure.
+    /// A [`Balance`] struct containing the user's balance information.
     pub async fn get_balance(&self) -> Result<Balance, TripoError> {
-        let url = self.base_url.join("v2/openapi/user/balance")?;
+        let url = self.base_url.join("user/balance")?;
         let response = self.client.get(url).send().await?;
 
         if response.status().is_success() {
@@ -347,4 +545,4 @@ impl TripoClient {
 
         Ok(downloaded_files)
     }
-} 
+}

@@ -23,8 +23,8 @@ async fn main() -> anyhow::Result<()> {
     let image_path = "assets/image.png";
     println!("Submitting task for image: '{}'", image_path);
 
-    // Call the image_to_3d method.
-    match client.image_to_3d(image_path).await {
+    // Call the image_to_model method.
+    match client.image_to_model(image_path).await {
         Ok(response) => {
             println!("\nSuccessfully submitted task.");
             println!("-> Task ID: {}", response.task_id);
