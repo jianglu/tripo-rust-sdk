@@ -15,10 +15,13 @@ use url::Url;
 use aws_sdk_s3::config::SharedCredentialsProvider;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::primitives::ByteStream;
+use chrono::{DateTime, Utc};
+use futures_util::{Stream, StreamExt};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use reqwest::multipart;
 use tokio::fs::File;
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tokio_util::codec::{BytesCodec, FramedRead};
 
 const DEFAULT_API_URL: &str = "https://api.tripo3d.ai/v2/openapi/";
@@ -35,6 +38,7 @@ static UUID_RE: Lazy<Regex> = Lazy::new(|| {
 pub struct TripoClient {
     client: reqwest::Client,
     base_url: Url,
+    api_key: String,
     /// (For testing) Overrides the S3 endpoint to allow mocking S3 uploads.
     pub s3_endpoint_override: Option<String>,
 }
@@ -65,17 +69,13 @@ impl TripoClient {
     /// let client_from_env = TripoClient::new(None);
     /// ```
     pub fn new(api_key: Option<String>) -> Result<Self, TripoError> {
-        let api_key = api_key
-            .or_else(|| env::var("TRIPO_API_KEY").ok());
+        let api_key = api_key.or_else(|| env::var("TRIPO_API_KEY").ok());
         let Some(key) = api_key else {
             return Err(TripoError::MissingApiKey);
         };
 
         let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            format!("Bearer {}", key).parse().unwrap(),
-        );
+        headers.insert(AUTHORIZATION, format!("Bearer {}", key).parse().unwrap());
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
@@ -86,38 +86,7 @@ impl TripoClient {
         Ok(Self {
             client,
             base_url,
-            s3_endpoint_override: None,
-        })
-    }
-
-    /// Creates a new `TripoClient` with a custom base URL.
-    ///
-    /// This is useful for testing or for connecting to a different API endpoint.
-    ///
-    /// # Arguments
-    ///
-    /// * `api_key` - The API key for authentication.
-    /// * `base_url` - The base URL for the API (e.g., for a mock server).
-    ///
-    /// # Errors
-    ///
-    /// This function can return an error if the internal HTTP client fails to build or if the provided `base_url` is invalid.
-    pub fn new_with_url(api_key: String, base_url: &str) -> Result<Self, TripoError> {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            format!("Bearer {}", api_key).parse().unwrap(),
-        );
-
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            .build()?;
-
-        let base_url = Url::parse(base_url)?;
-
-        Ok(Self {
-            client,
-            base_url,
+            api_key: key,
             s3_endpoint_override: None,
         })
     }
@@ -213,7 +182,7 @@ impl TripoClient {
 
         // 3. Upload file to S3
         let body = ByteStream::from_path(image_path.as_ref()).await?;
-        
+
         s3_client
             .put_object()
             .bucket(sts_data.resource_bucket.clone())
@@ -421,6 +390,63 @@ impl TripoClient {
         }
     }
 
+    /// Watches a single task for real-time status updates using WebSockets.
+    ///
+    /// This is a more efficient alternative to polling `get_task`. It opens a WebSocket
+    /// connection and yields `TaskStatus` updates as they are received from the server.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - The ID of the task to watch.
+    ///
+    /// # Returns
+    ///
+    /// On success, a `Stream` that yields `Result<TaskStatus, TripoError>` items.
+    /// The stream closes when the server closes the connection (typically after the task completes).
+    ///
+    /// # Errors
+    ///
+    /// Returns a `TripoError` if the initial WebSocket connection fails. Stream items can be errors
+    /// if a message is received that cannot be parsed or if a transport error occurs.
+    pub async fn watch_task(
+        &self,
+        task_id: &str,
+    ) -> Result<impl Stream<Item = Result<TaskStatus, TripoError>>, TripoError> {
+        let ws_base_url = self.get_ws_base_url()?;
+        let watch_url = ws_base_url.join(&format!("task/watch/{}", task_id))?;
+        self.connect_and_stream_tasks(watch_url).await
+    }
+
+    /// Watches all tasks for real-time status updates using WebSockets.
+    ///
+    /// It opens a WebSocket connection and yields `TaskStatus` updates as they are received.
+    /// An optional timestamp can be provided to receive updates since that time.
+    ///
+    /// # Arguments
+    ///
+    /// * `since` - An optional `DateTime<Utc>` to get updates from a specific point in time.
+    ///             If `None`, it starts watching for new updates from the present moment.
+    ///
+    /// # Returns
+    ///
+    /// A `Stream` that yields `Result<TaskStatus, TripoError>` items.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `TripoError` if the initial connection fails.
+    pub async fn watch_all_tasks(
+        &self,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<impl Stream<Item = Result<TaskStatus, TripoError>>, TripoError> {
+        let ws_base_url = self.get_ws_base_url()?;
+        let watch_url = if let Some(time) = since {
+            ws_base_url.join(&format!("task/watch/all/{}", time.to_rfc3339()))?
+        } else {
+            ws_base_url.join("task/watch/all")?
+        };
+        self.connect_and_stream_tasks(watch_url).await
+    }
+
     /// Queries the user's current account balance.
     ///
     /// # Returns
@@ -443,6 +469,52 @@ impl TripoClient {
                 message: format!("API error: {}", error_body),
             })
         }
+    }
+
+    async fn connect_and_stream_tasks(
+        &self,
+        url: Url,
+    ) -> Result<impl Stream<Item = Result<TaskStatus, TripoError>>, TripoError> {
+        let request = tokio_tungstenite::tungstenite::http::Request::builder()
+            .method("GET")
+            .uri(url.as_str())
+            .header("Authorization", &format!("Bearer {}", self.api_key))
+            .header("Host", url.host_str().unwrap_or_default())
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+            )
+            .body(())?;
+
+        let (ws_stream, _) = connect_async(request).await?;
+
+        Ok(ws_stream.filter_map(|msg| async {
+            match msg {
+                Ok(Message::Text(text)) => {
+                    match serde_json::from_str::<ApiResponse<TaskStatus>>(&text) {
+                        Ok(api_response) => Some(Ok(api_response.data)),
+                        Err(e) => Some(Err(TripoError::from(e))),
+                    }
+                }
+                Ok(Message::Close(_)) => None,
+                Err(e) => Some(Err(TripoError::from(e))),
+                _ => None, // Ignore other message types like Binary, Ping, Pong
+            }
+        }))
+    }
+
+    fn get_ws_base_url(&self) -> Result<Url, TripoError> {
+        let mut ws_url = self.base_url.clone();
+        let scheme = if ws_url.scheme() == "https" { "wss" } else { "ws" };
+        ws_url
+            .set_scheme(scheme)
+            .map_err(|_| TripoError::ApiError {
+                message: "Failed to set WebSocket scheme".to_string(),
+            })?;
+        Ok(ws_url)
     }
 
     /// Waits for a task to complete by polling its status.

@@ -31,4 +31,12 @@ pub enum TripoError {
     /// The byte stream for a file upload could not be created.
     #[error("File upload stream could not be created: {0}")]
     UploadStreamError(#[from] aws_sdk_s3::primitives::ByteStreamError),
+
+    /// A WebSocket connection or message error occurred.
+    #[error("WebSocket error: {0}")]
+    WebSocketError(#[from] tokio_tungstenite::tungstenite::Error),
+
+    /// An HTTP request could not be built.
+    #[error("Failed to build HTTP request: {0}")]
+    HttpError(#[from] tokio_tungstenite::tungstenite::http::Error),
 } 
