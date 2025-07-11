@@ -1,7 +1,7 @@
 use crate::error::TripoError;
 use crate::types::{
-    ApiResponse, Balance, FileContent, ImageTaskRequest, ResultFile, S3Object, TaskResponse,
-    TaskState, TaskStatus, TextToModelRequest, StsTokenData, StandardUploadData,
+    ApiResponse, Balance, FileContent, ImageTaskRequest, ResultFile, S3Object, StandardUploadData,
+    StsTokenData, TaskResponse, TaskState, TaskStatus, TextToModelRequest,
 };
 use reqwest::header::{HeaderMap, AUTHORIZATION};
 use std::env;
@@ -12,8 +12,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::sleep;
 use url::Url;
 
-use aws_sdk_s3::config::SharedCredentialsProvider;
 use aws_credential_types::Credentials;
+use aws_sdk_s3::config::SharedCredentialsProvider;
 use aws_sdk_s3::primitives::ByteStream;
 use chrono::{DateTime, Utc};
 use futures_util::{Stream, StreamExt};
@@ -69,24 +69,43 @@ impl TripoClient {
     /// let client_from_env = TripoClient::new(None);
     /// ```
     pub fn new(api_key: Option<String>) -> Result<Self, TripoError> {
+        Self::new_with_url(api_key, DEFAULT_API_URL)
+    }
+
+    /// Creates a new `TripoClient` with a custom base URL.
+    ///
+    /// This is useful for testing or for connecting to a different API endpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `api_key` - The API key for authentication.
+    /// * `base_url` - The base URL for the API (e.g., for a mock server).
+    ///
+    /// # Errors
+    ///
+    /// This function can return an error if the internal HTTP client fails to build or if the provided `base_url` is invalid.
+    pub fn new_with_url(api_key: Option<String>, base_url: &str) -> Result<Self, TripoError> {
         let api_key = api_key.or_else(|| env::var("TRIPO_API_KEY").ok());
-        let Some(key) = api_key else {
+        let Some(api_key) = api_key else {
             return Err(TripoError::MissingApiKey);
         };
 
         let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, format!("Bearer {}", key).parse().unwrap());
+        headers.insert(
+            AUTHORIZATION,
+            format!("Bearer {}", api_key).parse().unwrap(),
+        );
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
             .build()?;
 
-        let base_url = Url::parse(DEFAULT_API_URL)?;
+        let base_url = Url::parse(base_url)?;
 
         Ok(Self {
             client,
             base_url,
-            api_key: key,
+            api_key,
             s3_endpoint_override: None,
         })
     }
@@ -144,7 +163,10 @@ impl TripoClient {
     /// # Errors
     ///
     /// Returns a `TripoError` if fetching STS tokens, reading the file, or uploading to S3 fails.
-    pub async fn upload_file_s3<P: AsRef<Path>>(&self, image_path: P) -> Result<FileContent, TripoError> {
+    pub async fn upload_file_s3<P: AsRef<Path>>(
+        &self,
+        image_path: P,
+    ) -> Result<FileContent, TripoError> {
         // 1. Get STS token from Tripo API
         let url = self.base_url.join("upload/sts/token")?;
         let sts_response: ApiResponse<StsTokenData> = self
@@ -374,9 +396,7 @@ impl TripoClient {
     ///
     /// Returns a `TripoError` if the API request fails.
     pub async fn get_task(&self, task_id: &str) -> Result<TaskStatus, TripoError> {
-        let url = self
-            .base_url
-            .join(&format!("task/{}", task_id))?;
+        let url = self.base_url.join(&format!("task/{}", task_id))?;
         let response = self.client.get(url).send().await?;
 
         if response.status().is_success() {
@@ -508,7 +528,11 @@ impl TripoClient {
 
     fn get_ws_base_url(&self) -> Result<Url, TripoError> {
         let mut ws_url = self.base_url.clone();
-        let scheme = if ws_url.scheme() == "https" { "wss" } else { "ws" };
+        let scheme = if ws_url.scheme() == "https" {
+            "wss"
+        } else {
+            "ws"
+        };
         ws_url
             .set_scheme(scheme)
             .map_err(|_| TripoError::ApiError {
